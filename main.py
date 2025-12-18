@@ -3,110 +3,95 @@ import json
 import os
 from playwright.async_api import async_playwright
 
-async def scrape_product(url):
+
+async def scrape_product(url: str) -> dict:
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=True,
             args=["--no-sandbox", "--disable-dev-shm-usage"]
         )
-        page = await browser.new_page()
 
+        page = await browser.new_page()
         await page.goto(url, wait_until="networkidle")
         await page.wait_for_timeout(3000)
 
-        # Çerez popup kapatma
+        # Cookie accept (best-effort)
         cookie_selectors = [
-            'button:has-text("Kabul Et")',
             'button#onetrust-accept-btn-handler',
+            'button:has-text("Kabul Et")',
             'button:has-text("Çerezleri Kabul Et")',
-            'button[data-testid="cookie-accept-button"]',
             'button:has-text("Accept All")'
         ]
-        for sel in cookie_selectors:
+        for selector in cookie_selectors:
             try:
-                await page.wait_for_selector(sel, timeout=2000)
-                await page.click(sel)
+                await page.click(selector, timeout=2000)
                 break
-            except:
-                continue
+            except Exception:
+                pass
 
-        await page.wait_for_timeout(2000)
-        await page.evaluate("window.scrollTo(0, document.body.scrollHeight/3)")
-        await page.wait_for_timeout(1000)
+        await page.wait_for_timeout(1500)
 
-        # Ürün başlığı
-        title = await page.locator("h1").first.inner_text()
+        # Scroll biraz
+        await page.evaluate("window.scrollTo(0, document.body.scrollHeight / 3)")
+        await page.wait_for_timeout(1500)
 
-        # Fiyat
+        # Title
+        title = ""
+        try:
+            title = await page.locator("h1").first.inner_text()
+        except Exception:
+            pass
+
+        # Price (fallback'li)
         price = None
-        price_locator = page.locator("span.price-view-original")
-        if await price_locator.count() > 0:
-            price = await price_locator.first.inner_text()
-
-        # Açıklama
-        description = ""
-        desc_locator = page.locator(
-            "div#product-description, div.product-description, div#productDetail"
-        )
-        if await desc_locator.count() > 0:
-            description = await desc_locator.first.inner_text()
-
-        # Görseller
-        images = []
-        thumbs = page.locator("img")
-        for i in range(await thumbs.count()):
-            src = await thumbs.nth(i).get_attribute("src")
-            if src and src.startswith("http") and src not in images:
-                images.append(src)
-
-        # Yorumlar (limitli)
-        comments = []
-        comment_selectors = [
-            "div.comment",
-            "div[data-testid='comment']",
-            "div.review-item"
+        price_selectors = [
+            "span.price-view-original",
+            "span.prc-dsc",
+            "span.prc-org"
         ]
-        for selector in comment_selectors:
-            items = page.locator(selector)
-            if await items.count() > 0:
-                for i in range(min(await items.count(), 50)):
-                    try:
-                        text = await items.nth(i).inner_text()
-                        if text.strip():
-                            comments.append({"text": text.strip()})
-                    except:
-                        continue
-                break
+        for sel in price_selectors:
+            try:
+                loc = page.locator(sel)
+                if await loc.count() > 0:
+                    price = await loc.first.inner_text()
+                    break
+            except Exception:
+                pass
 
-        # Q&A
+        # Description
+        description = ""
+        try:
+            desc = page.locator("div#product-description")
+            if await desc.count() > 0:
+                description = await desc.first.inner_text()
+        except Exception:
+            pass
+
+        # Images (tüm img src – ürünleşirken filtrelenecek)
+        images = []
+        try:
+            imgs = page.locator("img")
+            count = await imgs.count()
+            for i in range(count):
+                src = await imgs.nth(i).get_attribute("src")
+                if src and src.startswith("http") and src not in images:
+                    images.append(src)
+        except Exception:
+            pass
+
+        # Comments (şimdilik boş – DOM çok değişken)
+        comments = []
+
+        # QnA (şimdilik boş)
         qna = []
-        qna_items = page.locator("div.qna-item")
-        if await qna_items.count() > 0:
-            for i in range(min(await qna_items.count(), 50)):
-                try:
-                    question = ""
-                    answer = ""
-                    q = qna_items.nth(i).locator("h4")
-                    a = qna_items.nth(i).locator("h5")
-                    if await q.count() > 0:
-                        question = await q.first.inner_text()
-                    if await a.count() > 0:
-                        answer = await a.first.inner_text()
-                    if question or answer:
-                        qna.append({
-                            "question": question.strip(),
-                            "answer": answer.strip()
-                        })
-                except:
-                    continue
 
         await browser.close()
 
         return {
             "url": url,
-            "title": title.strip(),
+            "title": title.strip() if title else None,
             "price": price.strip() if price else None,
-            "description": description.strip(),
+            "description": description.strip() if description else "",
             "images": images,
             "comments": comments,
             "qna": qna
@@ -120,11 +105,9 @@ def main():
 
     data = asyncio.run(scrape_product(url))
 
-    # Railway log’larına JSON bas (n8n / debug için ideal)
-   print("===SCRAPE_RESULT_START===")
-print(json.dumps(data, ensure_ascii=False))
-print("===SCRAPE_RESULT_END===")
-
+    print("===SCRAPE_RESULT_START===")
+    print(json.dumps(data, ensure_ascii=False))
+    print("===SCRAPE_RESULT_END===")
 
 
 if __name__ == "__main__":
