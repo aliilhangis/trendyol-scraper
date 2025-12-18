@@ -1,14 +1,13 @@
 import asyncio
 import json
 import os
-import re
 import requests
 from playwright.async_api import async_playwright
 
 
-# -------------------------
-# Playwright: productId al
-# -------------------------
+# -------------------------------------------------
+# Playwright: productId'yi JS state içinden al
+# -------------------------------------------------
 async def get_product_id(url: str) -> int:
     async with async_playwright() as p:
         browser = await p.chromium.launch(
@@ -19,71 +18,72 @@ async def get_product_id(url: str) -> int:
         await page.goto(url, wait_until="networkidle")
         await page.wait_for_timeout(3000)
 
-        # Sayfa JS state içinden productId çek
-        content = await page.content()
+        product_id = await page.evaluate("""
+            () => {
+                try {
+                    return window.__PRODUCT_DETAIL_APP_INITIAL_STATE__
+                        ?.product
+                        ?.productId || null;
+                } catch (e) {
+                    return null;
+                }
+            }
+        """)
 
-        browser.close()
+        await browser.close()
 
-        match = re.search(r'"productId"\s*:\s*(\d+)', content)
-        if not match:
+        if not product_id:
             raise Exception("productId bulunamadı")
 
-        return int(match.group(1))
+        return int(product_id)
 
 
-# -------------------------
+# -------------------------------------------------
 # Trendyol API – Yorumlar
-# -------------------------
+# -------------------------------------------------
 def get_comments(product_id: int, limit: int = 20) -> list:
     url = f"https://public-mdc.trendyol.com/discovery-web-socialgw-service/api/review/{product_id}"
-    params = {
-        "page": 0,
-        "size": limit,
-        "orderBy": "DESC"
-    }
+    params = {"page": 0, "size": limit}
 
     res = requests.get(url, params=params, timeout=15)
     res.raise_for_status()
     data = res.json()
 
     comments = []
-    for item in data.get("result", {}).get("reviews", []):
+    for r in data.get("result", {}).get("reviews", []):
         comments.append({
-            "rate": item.get("rate"),
-            "comment": item.get("comment"),
-            "date": item.get("commentDate")
+            "rate": r.get("rate"),
+            "comment": r.get("comment"),
+            "date": r.get("commentDate")
         })
 
     return comments
 
 
-# -------------------------
-# Trendyol API – QnA
-# -------------------------
+# -------------------------------------------------
+# Trendyol API – Soru / Cevap
+# -------------------------------------------------
 def get_qna(product_id: int, limit: int = 20) -> list:
     url = f"https://public-mdc.trendyol.com/discovery-web-socialgw-service/api/qna/{product_id}"
-    params = {
-        "page": 0,
-        "size": limit
-    }
+    params = {"page": 0, "size": limit}
 
     res = requests.get(url, params=params, timeout=15)
     res.raise_for_status()
     data = res.json()
 
     qna = []
-    for item in data.get("result", {}).get("questions", []):
+    for q in data.get("result", {}).get("questions", []):
         qna.append({
-            "question": item.get("question"),
-            "answer": item.get("answer")
+            "question": q.get("question"),
+            "answer": q.get("answer")
         })
 
     return qna
 
 
-# -------------------------
+# -------------------------------------------------
 # MAIN
-# -------------------------
+# -------------------------------------------------
 def main():
     url = os.getenv("PRODUCT_URL")
     if not url:
