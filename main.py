@@ -5,106 +5,89 @@ import re
 from playwright.async_api import async_playwright
 
 async def scrape_product(url: str) -> dict:
-    captured_data = {"reviews": [], "questions": []}
-
     async with async_playwright() as p:
-        # 1. Tarayıcıyı 'Stealth' başlat
+        # Daha az bot izi bırakan başlatma
         browser = await p.chromium.launch(
             headless=True,
             args=[
-                "--no-sandbox", 
+                "--no-sandbox",
                 "--disable-blink-features=AutomationControlled",
-                "--use-fake-ui-for-media-stream",
-                "--window-size=1920,1080"
+                "--disable-infobars"
             ]
         )
         
-        # 2. Gerçekçi bir Context oluştur
+        # Gerçek bir kullanıcı çerez yapısı ve dili simüle ediliyor
         context = await browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-            viewport={'width': 1920, 'height': 1080},
-            extra_http_headers={"Accept-Language": "tr-TR,tr;q=0.9"}
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            locale="tr-TR",
+            timezone_id="Europe/Istanbul"
         )
 
-        # Webdriver izini sil
-        await context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-        
         page = await context.new_page()
-
-        # 3. API Yanıtlarını Yakala
-        async def handle_response(response):
-            try:
-                # Trendyol yorum ve soru API uç noktaları
-                if "discovery-web-social-gateway/reviews" in response.url and response.status == 200:
-                    res_json = await response.json()
-                    captured_data["reviews"] = res_json.get("result", {}).get("productReviews", {}).get("content", [])
-                if "discovery-web-questions-gateway/questions" in response.url and response.status == 200:
-                    res_json = await response.json()
-                    captured_data["questions"] = res_json.get("result", {}).get("items", [])
-            except: pass
-
-        page.on("response", handle_response)
+        
+        # Bot kontrolü olan 'webdriver' özelliğini tamamen kaldır
+        await page.add_init_script("delete navigator.__proto__.webdriver")
 
         print(f"Hedefe gidiliyor: {url}")
         
-        # 4. Sayfaya git ve çerezleri/renderı bekle
-        await page.goto(url, wait_until="commit", timeout=60000)
-        await page.wait_for_timeout(3000) # İlk yükleme
+        # Sayfaya git ve içeriğin render edilmesi için süre tanı
+        await page.goto(url, wait_until="networkidle", timeout=60000)
         
-        # Fiyat ve görsellerin yüklenmesi için 'scroll' yap
-        # Trendyol scroll yapılmadan API'leri tetiklemez
-        for _ in range(3):
-            await page.mouse.wheel(0, 1000)
-            await page.wait_for_timeout(1500)
+        # Sayfada gerçek bir insan gibi bekle ve kaydır
+        await page.wait_for_timeout(4000)
+        await page.mouse.wheel(0, 1500) 
+        await page.wait_for_timeout(2000)
 
-        # 5. Verileri Ayıkla (HTML + Veri Katmanı)
+        # Temel Bilgiler
         full_url = page.url
-        title = await page.locator("h1").first.inner_text() if await page.locator("h1").count() > 0 else "Bulunamadı"
-        
-        # Fiyatı yakalamak için daha derin tarama
+        title = "Bulunamadı"
         price = "Bulunamadı"
-        price_selectors = [".prc-dsc", ".prc-org", "span.product-price", ".total-price"]
-        for sel in price_selectors:
+        reviews = []
+        questions = []
+
+        # --- VERİ ÇEKME STRATEJİSİ ---
+        # 1. Başlık
+        title_loc = page.locator("h1.pr-new-br span, h1").first
+        if await title_loc.count() > 0:
+            title = await title_loc.inner_text()
+
+        # 2. Fiyat (En güncel seçiciler)
+        for sel in [".prc-dsc", ".prc-org", "span[data-behold='price-value']", ".product-price"]:
             if await page.locator(sel).count() > 0:
                 price = await page.locator(sel).first.inner_text()
                 break
 
-        # Görseller
-        images = []
+        # 3. Yorumlar ve Sorular (Data Layer üzerinden deneme)
         try:
-            # Sadece ürün ana görsellerini al (Thumbnail değil)
-            imgs = await page.query_selector_all(".product-slide img, .base-product-image img")
-            for img in imgs:
-                src = await img.get_attribute("src")
-                if src and "cdn.dsmcdn" in src:
-                    images.append(src)
-        except: pass
+            raw_state = await page.evaluate("window.__PRODUCT_DETAIL_APP_INITIAL_STATE__")
+            if raw_state:
+                if "reviews" in raw_state:
+                    reviews = raw_state["reviews"].get("content", [])
+                if "questions" in raw_state:
+                    questions = raw_state["questions"].get("items", [])
+        except:
+            pass
 
         await browser.close()
 
     return {
         "status": "success",
-        "title": title,
-        "price": price,
+        "title": title.strip() if title else title,
+        "price": price.strip() if price else price,
         "full_url": full_url,
-        "images": list(set(images))[:5], # İlk 5 görsel yeterli
-        "reviews": captured_data["reviews"],
-        "questions": captured_data["questions"],
-        "reviews_count": len(captured_data["reviews"]),
-        "questions_count": len(captured_data["questions"])
+        "reviews_count": len(reviews),
+        "questions_count": len(questions),
+        "reviews": reviews[:5], # Logları kirletmemek için ilk 5'i
+        "questions": questions[:5]
     }
 
 def main():
-    # Railway environment variable veya test linki
     input_url = os.getenv("PRODUCT_URL", "https://ty.gl/s1rjjs18qobjp")
-    
-    try:
-        result = asyncio.run(scrape_product(input_url))
-        print("===SCRAPE_RESULT_START===")
-        print(json.dumps(result, ensure_ascii=False, indent=2))
-        print("===SCRAPE_RESULT_END===")
-    except Exception as e:
-        print(f"Hata: {e}")
+    result = asyncio.run(scrape_product(input_url))
+
+    print("===SCRAPE_RESULT_START===")
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    print("===SCRAPE_RESULT_END===")
 
 if __name__ == "__main__":
     main()
