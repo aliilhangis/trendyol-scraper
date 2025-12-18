@@ -5,99 +5,91 @@ import re
 from playwright.async_api import async_playwright
 
 async def scrape_product(url: str) -> dict:
+    captured_data = {
+        "reviews": [],
+        "questions": [],
+        "details": {}
+    }
+
     async with async_playwright() as p:
-        # Daha "insansı" bir tarayıcı profili
         browser = await p.chromium.launch(
-            headless=True, 
+            headless=True,
             args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-blink-features=AutomationControlled"]
         )
-        # Gerçek bir Windows tarayıcısı gibi davran
         context = await browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            viewport={'width': 1920, 'height': 1080},
-            locale="tr-TR"
+            viewport={'width': 1920, 'height': 1080}
         )
         page = await context.new_page()
-        
+
+        # AĞ TRAFİĞİNİ DİNLE: Trendyol'un API yanıtlarını yakala
+        async def handle_response(response):
+            try:
+                if "reviews" in response.url and response.status == 200:
+                    data = await response.json()
+                    captured_data["reviews"] = data.get("result", {}).get("productReviews", {}).get("content", [])
+                elif "questions" in response.url and response.status == 200:
+                    data = await response.json()
+                    captured_data["questions"] = data.get("result", {}).get("items", [])
+            except:
+                pass
+
+        page.on("response", handle_response)
+
         print(f"Hedefe gidiliyor: {url}")
+        await page.goto(url, wait_until="networkidle", timeout=90000)
         
-        # 1. SAYFAYI AÇ VE YÖNLENDİRMEYİ BEKLE
-        try:
-            response = await page.goto(url, wait_until="domcontentloaded", timeout=60000)
-            # Kısa linkten uzun linke geçiş için ekstra bekleme
-            await page.wait_for_timeout(5000) 
-            
-            # Eğer çerez onayı penceresi çıkarsa kapat (Bazen veriyi engeller)
-            try:
-                if await page.locator("#onetrust-accept-btn-handler").count() > 0:
-                    await page.click("#onetrust-accept-btn-handler", timeout=2000)
-            except: pass
+        # Sayfayı aşağı kaydır (Yorumlar ve detayların yüklenmesi için tetikleyici olur)
+        await page.mouse.wheel(0, 2000)
+        await page.wait_for_timeout(5000)
 
-        except Exception as e:
-            print(f"Yükleme hatası: {e}")
-
-        # 2. UZUN URL VE ID TESPİTİ
+        # HTML'den temel bilgileri al (Yedek)
         full_url = page.url
-        content_id = None
-        id_match = re.search(r'p-(\d+)', full_url)
-        if id_match:
-            content_id = id_match.group(1)
+        title = await page.locator("h1").first.inner_text() if await page.locator("h1").count() > 0 else "Bulunamadı"
         
-        # 3. VERİ ÇEKME (JSON + HTML HYBRID)
-        data_result = {
-            "title": "Bulunamadı",
-            "price": "Bulunamadı",
-            "images": [],
-            "reviews": [],
-            "questions": []
-        }
-
-        # Ham veri objesini sayfadan çekmeye çalış
+        # Fiyatı yakalamak için daha agresif bir yöntem
+        price = "Bulunamadı"
         try:
-            raw_data = await page.evaluate("() => window.__PRODUCT_DETAIL_APP_INITIAL_STATE__")
-            if raw_data and "product" in raw_data:
-                p_info = raw_data["product"]
-                data_result["title"] = p_info.get("name")
-                data_result["price"] = p_info.get("price", {}).get("sellingPrice", {}).get("value")
-                data_result["images"] = [f"https://cdn.dsmcdn.com{img}" for img in p_info.get("images", [])]
-                
-                # Yorum ve Sorular (Sayfaya gömülüyse)
-                if "reviews" in raw_data:
-                    data_result["reviews"] = raw_data["reviews"].get("content", [])
-                if "questions" in raw_data:
-                    data_result["questions"] = raw_data["questions"].get("items", [])
-        except:
-            print("JS Objesi okunamadı, HTML denemesi yapılıyor...")
+            # Sayfa içindeki tüm sayısal fiyat değerlerini ara
+            price_element = page.locator(".prc-dsc, .prc-org, [data-behold='price-value']").first
+            if await price_element.count() > 0:
+                price = await price_element.inner_text()
+        except: pass
 
-        # Yedek Plan: HTML Selector'lar
-        if data_result["title"] == "Bulunamadı":
-            try:
-                data_result["title"] = await page.locator("h1").first.inner_text()
-                # Fiyat için alternatif selector
-                for sel in [".prc-dsc", ".prc-org", "span[data-behold='price-value']"]:
-                    if await page.locator(sel).count() > 0:
-                        data_result["price"] = await page.locator(sel).first.inner_text()
-                        break
-            except: pass
+        # Görselleri al
+        images = []
+        try:
+            img_elements = await page.locator(".product-slide img").all()
+            for img in img_elements:
+                src = await img.get_attribute("src")
+                if src and "cdn.dsmcdn" in src:
+                    images.append(src)
+        except: pass
 
         await browser.close()
 
     return {
         "status": "success",
-        "content_id": content_id,
         "full_url": full_url,
-        "data": data_result
+        "title": title,
+        "price": price,
+        "images": list(set(images)),
+        "reviews": captured_data["reviews"],
+        "questions": captured_data["questions"],
+        "reviews_count": len(captured_data["reviews"]),
+        "questions_count": len(captured_data["questions"])
     }
 
 def main():
-    # URL'yi env'den al veya default kullan
     input_url = os.getenv("PRODUCT_URL", "https://ty.gl/s1rjjs18qobjp")
     
-    result = asyncio.run(scrape_product(input_url))
-
-    print("===SCRAPE_RESULT_START===")
-    print(json.dumps(result, ensure_ascii=False, indent=2))
-    print("===SCRAPE_RESULT_END===")
+    try:
+        result = asyncio.run(scrape_product(input_url))
+        print("===SCRAPE_RESULT_START===")
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        print("===SCRAPE_RESULT_END===")
+    except Exception as e:
+        print(f"Hata oluştu: {e}")
 
 if __name__ == "__main__":
     main()
