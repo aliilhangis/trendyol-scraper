@@ -1,60 +1,28 @@
-import asyncio
 import json
 import os
+import re
 import requests
-from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
 
 
-async def get_product_id(url: str) -> int:
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            headless=True,
-            args=[
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-blink-features=AutomationControlled"
-            ]
+def get_product_id_from_url(url: str) -> int:
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36"
         )
+    })
 
-        context = await browser.new_context(
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/120.0.0.0 Safari/537.36"
-            )
-        )
+    r = session.get(url, allow_redirects=True, timeout=20)
+    final_url = r.url
 
-        page = await context.new_page()
+    # URL içinden -p-123456789 yakala
+    match = re.search(r"-p-(\d+)", final_url)
+    if not match:
+        raise Exception("productId URL içinden bulunamadı")
 
-        try:
-            await page.goto(url, wait_until="domcontentloaded", timeout=45000)
-        except PlaywrightTimeoutError:
-            pass  # yine de JS state'i deneyelim
-
-        # JS state oluşana kadar bekle (max 15 sn)
-        product_id = None
-        for _ in range(15):
-            product_id = await page.evaluate("""
-                () => {
-                    try {
-                        return window.__PRODUCT_DETAIL_APP_INITIAL_STATE__
-                            ?.product
-                            ?.productId || null;
-                    } catch (e) {
-                        return null;
-                    }
-                }
-            """)
-            if product_id:
-                break
-            await page.wait_for_timeout(1000)
-
-        await browser.close()
-
-        if not product_id:
-            raise Exception("productId bulunamadı (sayfa state oluşmadı)")
-
-        return int(product_id)
+    return int(match.group(1))
 
 
 def get_comments(product_id: int, limit: int = 20) -> list:
@@ -97,7 +65,7 @@ def main():
     if not url:
         raise Exception("PRODUCT_URL environment variable bulunamadı")
 
-    product_id = asyncio.run(get_product_id(url))
+    product_id = get_product_id_from_url(url)
 
     output = {
         "url": url,
