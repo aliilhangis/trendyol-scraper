@@ -8,42 +8,40 @@ async def scrape_product(url: str) -> dict:
     captured_data = {"reviews": [], "questions": [], "price": "Bulunamadı"}
 
     async with async_playwright() as p:
-        # 1. Tarayıcıyı en 'insansı' ayarlarla başlat
+        # 1. BOT ENGELLERİNİ AŞAN BAŞLATMA AYARLARI
         browser = await p.chromium.launch(
             headless=True,
             args=[
                 "--no-sandbox",
+                "--disable-setuid-sandbox",
                 "--disable-blink-features=AutomationControlled",
-                "--disable-http2" # Bazı ban sistemleri HTTP2'den tanır, bunu kapatıyoruz
+                "--disable-http2" # Bazı sunucular HTTP2 parmak izinden botu tanır
             ]
         )
         
+        # Gerçek bir Windows kullanıcısı profili
         context = await browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            viewport={'width': 1280, 'height': 800}
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+            viewport={'width': 1280, 'height': 800},
+            extra_http_headers={"Accept-Language": "tr-TR,tr;q=0.9"}
         )
 
+        # Webdriver izini tamamen temizle
+        await context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+        
         page = await context.new_page()
 
-        # 2. API YANITLARINI YAKALAMA (En Garantici Yol)
+        # 2. ARKA PLAN API TRAFİĞİNİ YAKALA (Network Sniffing)
         async def handle_response(response):
             try:
-                # Yorumlar API'sini yakala
+                # Yorumlar ve Sorular API'lerini URL'den yakala
                 if "reviews" in response.url and response.status == 200:
-                    data = await response.json()
-                    captured_data["reviews"] = data.get("result", {}).get("productReviews", {}).get("content", [])
+                    res_json = await response.json()
+                    captured_data["reviews"] = res_json.get("result", {}).get("productReviews", {}).get("content", [])
                 
-                # Soru API'sini yakala
                 if "questions" in response.url and response.status == 200:
-                    data = await response.json()
-                    captured_data["questions"] = data.get("result", {}).get("items", [])
-                
-                # Ürün detay (fiyat) API'sini yakala
-                if "details" in response.url and response.status == 200:
-                    data = await response.json()
-                    price_val = data.get("result", {}).get("price", {}).get("sellingPrice", {}).get("value")
-                    if price_val:
-                        captured_data["price"] = str(price_val)
+                    res_json = await response.json()
+                    captured_data["questions"] = res_json.get("result", {}).get("items", [])
             except:
                 pass
 
@@ -51,49 +49,50 @@ async def scrape_product(url: str) -> dict:
 
         print(f"Hedefe gidiliyor: {url}")
         
-        # 3. SAYFAYA GİT VE ZORLA SCROLL YAP
+        # 3. SAYFAYA GİT VE ETKİLEŞİM KUR
         await page.goto(url, wait_until="domcontentloaded", timeout=60000)
-        
-        # Trendyol bazen botu 'çerez' sayfasında bekletir, sayfayı aktif tutalım
-        await page.wait_for_timeout(4000)
-        
-        # Sayfayı 5 parça halinde aşağı kaydır (API'leri tetikler)
-        for i in range(5):
-            await page.mouse.wheel(0, 800)
-            await page.wait_for_timeout(1000)
+        await page.wait_for_timeout(3000) # Sayfanın oturması için kısa bekleme
 
-        # 4. HTML'DEN YEDEK VERİ ÇEKME
+        # Trendyol scroll yapmadan yorumları yüklemez. 
+        # Sayfayı yavaşça 3 defa aşağı kaydırıyoruz.
+        for _ in range(3):
+            await page.mouse.wheel(0, 1000)
+            await page.wait_for_timeout(1500)
+
+        # 4. VERİLERİ TOPLA
+        full_url = page.url
         title = await page.locator("h1").first.inner_text() if await page.locator("h1").count() > 0 else "Başlık Alınamadı"
         
-        # Eğer API'den fiyat gelmediyse HTML'den kazıyalım
-        if captured_data["price"] == "Bulunamadı":
-            for sel in [".prc-dsc", ".prc-org", "span[data-behold='price-value']"]:
-                if await page.locator(sel).count() > 0:
-                    captured_data["price"] = await page.locator(sel).first.inner_text()
-                    break
+        # Fiyatı yakalamak için daha agresif bir tarama
+        price = "Bulunamadı"
+        for sel in [".prc-dsc", ".prc-org", "span[data-behold='price-value']"]:
+            if await page.locator(sel).count() > 0:
+                price = await page.locator(sel).first.inner_text()
+                break
+
+        # Görseller
+        images = []
+        try:
+            imgs = await page.query_selector_all(".product-slide img, .base-product-image img")
+            for img in imgs:
+                src = await img.get_attribute("src")
+                if src and "cdn.dsmcdn" in src:
+                    images.append(src)
+        except: pass
 
         await browser.close()
 
     return {
         "status": "success",
         "title": title,
-        "price": captured_data["price"],
+        "price": price,
+        "full_url": full_url,
+        "images": list(set(images))[:5],
+        "reviews": captured_data["reviews"],
+        "questions": captured_data["questions"],
         "reviews_count": len(captured_data["reviews"]),
-        "questions_count": len(captured_data["questions"]),
-        "reviews": captured_data["reviews"][:10], # İlk 10 yorum
-        "questions": captured_data["questions"][:10]
+        "questions_count": len(captured_data["questions"])
     }
 
 def main():
-    input_url = os.getenv("PRODUCT_URL", "https://ty.gl/s1rjjs18qobjp")
-    
-    try:
-        result = asyncio.run(scrape_product(input_url))
-        print("===SCRAPE_RESULT_START===")
-        print(json.dumps(result, ensure_ascii=False, indent=2))
-        print("===SCRAPE_RESULT_END===")
-    except Exception as e:
-        print(f"Sistem Hatası: {e}")
-
-if __name__ == "__main__":
-    main()
+    input_url = os.
