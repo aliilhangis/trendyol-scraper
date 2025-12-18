@@ -121,7 +121,10 @@ def main():
     data = asyncio.run(scrape_product(url))
 
     # Railway log’larına JSON bas (n8n / debug için ideal)
-    print(json.dumps(data, ensure_ascii=False, indent=2))
+   print("===SCRAPE_RESULT_START===")
+print(json.dumps(data, ensure_ascii=False))
+print("===SCRAPE_RESULT_END===")
+
 
 
 if __name__ == "__main__":
