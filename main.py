@@ -1,112 +1,107 @@
 import asyncio
 import json
 import os
+import re
+import requests
 from playwright.async_api import async_playwright
 
 
-async def scrape_product(url: str) -> dict:
+# -------------------------
+# Playwright: productId al
+# -------------------------
+async def get_product_id(url: str) -> int:
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=True,
             args=["--no-sandbox", "--disable-dev-shm-usage"]
         )
-
         page = await browser.new_page()
         await page.goto(url, wait_until="networkidle")
         await page.wait_for_timeout(3000)
 
-        # Cookie accept (best-effort)
-        cookie_selectors = [
-            'button#onetrust-accept-btn-handler',
-            'button:has-text("Kabul Et")',
-            'button:has-text("Çerezleri Kabul Et")',
-            'button:has-text("Accept All")'
-        ]
-        for selector in cookie_selectors:
-            try:
-                await page.click(selector, timeout=2000)
-                break
-            except Exception:
-                pass
+        # Sayfa JS state içinden productId çek
+        content = await page.content()
 
-        await page.wait_for_timeout(1500)
+        browser.close()
 
-        # Scroll biraz
-        await page.evaluate("window.scrollTo(0, document.body.scrollHeight / 3)")
-        await page.wait_for_timeout(1500)
+        match = re.search(r'"productId"\s*:\s*(\d+)', content)
+        if not match:
+            raise Exception("productId bulunamadı")
 
-        # Title
-        title = ""
-        try:
-            title = await page.locator("h1").first.inner_text()
-        except Exception:
-            pass
-
-        # Price (fallback'li)
-        price = None
-        price_selectors = [
-            "span.price-view-original",
-            "span.prc-dsc",
-            "span.prc-org"
-        ]
-        for sel in price_selectors:
-            try:
-                loc = page.locator(sel)
-                if await loc.count() > 0:
-                    price = await loc.first.inner_text()
-                    break
-            except Exception:
-                pass
-
-        # Description
-        description = ""
-        try:
-            desc = page.locator("div#product-description")
-            if await desc.count() > 0:
-                description = await desc.first.inner_text()
-        except Exception:
-            pass
-
-        # Images (tüm img src – ürünleşirken filtrelenecek)
-        images = []
-        try:
-            imgs = page.locator("img")
-            count = await imgs.count()
-            for i in range(count):
-                src = await imgs.nth(i).get_attribute("src")
-                if src and src.startswith("http") and src not in images:
-                    images.append(src)
-        except Exception:
-            pass
-
-        # Comments (şimdilik boş – DOM çok değişken)
-        comments = []
-
-        # QnA (şimdilik boş)
-        qna = []
-
-        await browser.close()
-
-        return {
-            "url": url,
-            "title": title.strip() if title else None,
-            "price": price.strip() if price else None,
-            "description": description.strip() if description else "",
-            "images": images,
-            "comments": comments,
-            "qna": qna
-        }
+        return int(match.group(1))
 
 
+# -------------------------
+# Trendyol API – Yorumlar
+# -------------------------
+def get_comments(product_id: int, limit: int = 20) -> list:
+    url = f"https://public-mdc.trendyol.com/discovery-web-socialgw-service/api/review/{product_id}"
+    params = {
+        "page": 0,
+        "size": limit,
+        "orderBy": "DESC"
+    }
+
+    res = requests.get(url, params=params, timeout=15)
+    res.raise_for_status()
+    data = res.json()
+
+    comments = []
+    for item in data.get("result", {}).get("reviews", []):
+        comments.append({
+            "rate": item.get("rate"),
+            "comment": item.get("comment"),
+            "date": item.get("commentDate")
+        })
+
+    return comments
+
+
+# -------------------------
+# Trendyol API – QnA
+# -------------------------
+def get_qna(product_id: int, limit: int = 20) -> list:
+    url = f"https://public-mdc.trendyol.com/discovery-web-socialgw-service/api/qna/{product_id}"
+    params = {
+        "page": 0,
+        "size": limit
+    }
+
+    res = requests.get(url, params=params, timeout=15)
+    res.raise_for_status()
+    data = res.json()
+
+    qna = []
+    for item in data.get("result", {}).get("questions", []):
+        qna.append({
+            "question": item.get("question"),
+            "answer": item.get("answer")
+        })
+
+    return qna
+
+
+# -------------------------
+# MAIN
+# -------------------------
 def main():
     url = os.getenv("PRODUCT_URL")
     if not url:
         raise Exception("PRODUCT_URL environment variable bulunamadı")
 
-    data = asyncio.run(scrape_product(url))
+    product_id = asyncio.run(get_product_id(url))
+    comments = get_comments(product_id)
+    qna = get_qna(product_id)
+
+    output = {
+        "url": url,
+        "productId": product_id,
+        "comments": comments,
+        "qna": qna
+    }
 
     print("===SCRAPE_RESULT_START===")
-    print(json.dumps(data, ensure_ascii=False))
+    print(json.dumps(output, ensure_ascii=False))
     print("===SCRAPE_RESULT_END===")
 
 
